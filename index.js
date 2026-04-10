@@ -1,52 +1,98 @@
-const express = require("express");
 const https = require("https");
-const app = express();
+const http = require("http");
+const url = require("url");
 
-app.use(express.json());
+const PORT = process.env.PORT || 3000;
 
-// Rota de teste para ver se o proxy está vivo
-app.get("/health", (_, res) => res.json({ status: "ok" }));
+const server = http.createServer((req, res) => {
+  // CORS
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-app.post("/proxy", async (req, res) => {
-  const {
-    target_path,
-    target_method,
-    target_body,
-    target_headers
-  } = req.body;
-
-  // Configuramos o acesso à InfoPago sem as linhas de cert/key que davam erro
-  const options = {
-    hostname: "api.pix.infopago.com.br",
-    path: target_path,
-    method: target_method || "GET",
-    headers: target_headers || { "Content-Type": "application/json" },
-    rejectUnauthorized: false, // Necessário para certificados auto-assinados
-  };
-
-  const proxyReq = https.request(options, (proxyRes) => {
-    let data = "";
-    proxyRes.on("data", (c) => (data += c));
-    proxyRes.on("end", () => {
-      res.status(proxyRes.statusCode)
-         .set("Content-Type", "application/json")
-         .send(data);
-    });
-  });
-
-  proxyReq.on("error", (e) => {
-    console.error("Erro no Proxy:", e.message);
-    res.status(500).json({ error: e.message });
-  });
-
-  if (target_body) {
-    const bodyData = typeof target_body === 'string' ? target_body : JSON.stringify(target_body);
-    proxyReq.write(bodyData);
+  if (req.method === "OPTIONS") {
+    res.writeHead(204);
+    return res.end();
   }
-  
-  proxyReq.end();
+
+  if (req.method !== "POST" || req.url !== "/proxy") {
+    res.writeHead(404, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify({ error: "Not found" }));
+  }
+
+  let body = "";
+  req.on("data", (chunk) => (body += chunk));
+  req.on("end", () => {
+    try {
+      const {
+        target_path,
+        target_method,
+        target_body,
+        target_headers,
+        client_cert_b64,
+        client_key_b64,
+      } = JSON.parse(body);
+
+      const agentOptions = { rejectUnauthorized: false };
+
+      if (client_cert_b64) {
+        agentOptions.cert = Buffer.from(client_cert_b64, "base64");
+      }
+      if (client_key_b64) {
+        agentOptions.key = Buffer.from(client_key_b64, "base64");
+      }
+
+      const agent = new https.Agent(agentOptions);
+
+      const targetUrl = url.parse(
+        "https://apis-pix.infopago.com.br" + target_path
+      );
+
+      const headers = target_headers || {};
+      if (target_body && !headers["Content-Type"]) {
+        headers["Content-Type"] = "application/json";
+      }
+      if (target_body) {
+        headers["Content-Length"] = Buffer.byteLength(target_body);
+      }
+
+      const options = {
+        hostname: targetUrl.hostname,
+        port: 443,
+        path: targetUrl.path,
+        method: target_method || "GET",
+        headers,
+        agent,
+      };
+
+      const proxyReq = https.request(options, (proxyRes) => {
+        let data = "";
+        proxyRes.on("data", (chunk) => (data += chunk));
+        proxyRes.on("end", () => {
+          res.writeHead(proxyRes.statusCode, {
+            "Content-Type": "application/json",
+          });
+          res.end(data);
+        });
+      });
+
+      proxyReq.on("error", (err) => {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message }));
+      });
+
+      if (target_body && target_method !== "GET") {
+        proxyReq.write(target_body);
+      }
+      proxyReq.end();
+    } catch (err) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Invalid JSON: " + err.message }));
+    }
+  });
 });
 
-// O Railway usa a porta da variável de ambiente PORT
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Proxy rodando na porta ${port}`));
+server.listen(PORT, () => {
+  console.log("Proxy listening on port " + PORT);
+});
+
