@@ -45,7 +45,7 @@ const server = http.createServer((req, res) => {
       const agent = new https.Agent(agentOptions);
 
       const targetUrl = url.parse(
-        "https://api-pix.infopago.com.br" + target_path
+        "https://api.pix.infopago.com.br" + target_path
       );
 
       const headers = target_headers || {};
